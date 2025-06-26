@@ -3,14 +3,17 @@ import fetch from 'node-fetch';
 import { promises as fs } from 'fs';
 import path from 'path';
 import { MavenDependency, MavenProject } from '../models/types.js';
+import { CacheService } from './cache-service.js';
 
 export class MavenParser {
   private mavenRepoUrl: string;
   private localRepoPath: string;
+  private cacheService?: CacheService;
 
-  constructor(localRepoPath?: string, mavenRepoUrl?: string) {
+  constructor(localRepoPath?: string, mavenRepoUrl?: string, cacheService?: CacheService) {
     this.mavenRepoUrl = mavenRepoUrl || 'https://repo1.maven.org/maven2';
     this.localRepoPath = localRepoPath || path.join(process.env.HOME || '', '.m2', 'repository');
+    this.cacheService = cacheService;
   }
 
   /**
@@ -18,8 +21,24 @@ export class MavenParser {
    */
   async parsePom(pomPath: string): Promise<MavenProject> {
     try {
+      // Check cache first
+      if (this.cacheService) {
+        const cachedProject = this.cacheService.getCachedPom(pomPath);
+        if (cachedProject) {
+          console.log(`Using cached POM data for ${pomPath}`);
+          return cachedProject;
+        }
+      }
+      
       const pomContent = await fs.readFile(pomPath, 'utf-8');
-      return this.parsePomContent(pomContent);
+      const project = await this.parsePomContent(pomContent);
+      
+      // Cache the result
+      if (this.cacheService) {
+        this.cacheService.cachePom(pomPath, project);
+      }
+      
+      return project;
     } catch (err) {
       const error = err as Error;
       console.error(`Error parsing POM file: ${pomPath}`, error);
@@ -76,12 +95,26 @@ export class MavenParser {
    * Resolve the full dependency tree for a Maven project
    */
   async resolveDependencyTree(pomPath: string): Promise<MavenDependency[]> {
+    // Check cache first
+    if (this.cacheService) {
+      const cachedDependencies = this.cacheService.getCachedDependencyTree(pomPath);
+      if (cachedDependencies) {
+        console.log(`Using cached dependency tree for ${pomPath}`);
+        return cachedDependencies;
+      }
+    }
+    
     const project = await this.parsePom(pomPath);
     const resolvedDeps: MavenDependency[] = [];
     const processedDeps = new Set<string>();
 
     for (const dep of project.dependencies) {
       await this.resolveDependency(dep, resolvedDeps, processedDeps);
+    }
+    
+    // Cache the result
+    if (this.cacheService) {
+      this.cacheService.cacheDependencyTree(pomPath, resolvedDeps);
     }
 
     return resolvedDeps;

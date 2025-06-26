@@ -9,6 +9,9 @@ An MCP (Model Context Protocol) server that helps AI assistants understand Java 
 - **Documentation Analysis**: Process Javadoc and source code to provide rich context about APIs
 - **Smart Search**: Find classes and methods based on name, functionality, or task description
 - **Usage Suggestions**: Get code examples and usage patterns for specific tasks
+- **Code Generation**: Generate code examples for common design patterns and usage scenarios
+- **Performant Caching**: Efficiently cache analyzed data to improve performance
+- **Offline Support**: Fallback to local repository and source analysis when remote repositories are unavailable
 
 ## Tools
 
@@ -22,6 +25,24 @@ An MCP (Model Context Protocol) server that helps AI assistants understand Java 
 | `get_method_examples` | Get usage examples for a Java method |
 | `analyze_project` | Analyze a complete Maven project including all dependencies |
 | `suggest_usage` | Suggest how to use a Java class for a specific task |
+| `generate_code_pattern` | Generate code examples for common usage patterns of a Java class |
+| `clear_cache` | Clear the cache to force fresh analysis |
+| `check_maven_repository` | Check connectivity to Maven repositories |
+
+## Code Generation Patterns
+
+The `generate_code_pattern` tool supports the following patterns:
+
+| Pattern | Description |
+|---------|-------------|
+| `builder` | Generates code using the Builder pattern |
+| `singleton` | Generates code using the Singleton pattern |
+| `factory` | Generates code using the Factory pattern |
+| `stream` | Generates code using Java Stream operations |
+| `crud` | Generates CRUD operations with a class |
+| `rest` | Generates REST client usage examples |
+| `callback` | Generates code with callback patterns |
+| `async` | Generates code using async/CompletableFuture patterns |
 
 ## Installation
 
@@ -42,13 +63,75 @@ You can run the server in two modes:
 ### Standard I/O Mode (Default)
 
 ```bash
+# Default usage
 node dist/index.js
+
+# With custom local repository path (command line)
+node dist/index.js --local-repo=/custom/path/to/repo
+
+# With custom local repository path (environment variable)
+MAVEN_LOCAL_REPO=/custom/path/to/repo node dist/index.js
 ```
 
 ### HTTP Server Mode (Optional)
 
 ```bash
 MCP_TRANSPORT=sse MCP_PORT=3000 node dist/index.js
+```
+
+## Configuration
+
+The Maven API Explorer supports multiple ways to configure the local Maven repository path:
+
+### Priority Order
+1. **Command line argument**: `--local-repo=/path/to/repo`
+2. **Environment variable**: `MAVEN_LOCAL_REPO=/path/to/repo`
+3. **Maven settings.xml**: `<localRepository>/path/to/repo</localRepository>`
+4. **Default**: `~/.m2/repository`
+
+### Configuration Examples
+
+#### Command Line Argument
+```bash
+node dist/index.js --local-repo=/custom/maven/repository
+```
+
+#### Environment Variable
+```bash
+export MAVEN_LOCAL_REPO=/custom/maven/repository
+node dist/index.js
+```
+
+#### MCP Client Configuration
+For use with Claude Desktop or other MCP clients:
+
+```json
+{
+  "mcpServers": {
+    "maven-api-explorer": {
+      "command": "node",
+      "args": [
+        "/path/to/maven-api-explorer/dist/index.js",
+        "--local-repo=/custom/maven/repository"
+      ],
+      "env": {
+        "MAVEN_LOCAL_REPO": "/custom/maven/repository"
+      }
+    }
+  }
+}
+```
+
+#### Maven Settings.xml
+The server automatically reads Maven settings.xml files from:
+- `~/.m2/settings.xml`
+- `$MAVEN_HOME/conf/settings.xml`
+
+Example settings.xml:
+```xml
+<settings>
+  <localRepository>/custom/maven/repository</localRepository>
+</settings>
 ```
 
 ## Example Workflows
@@ -65,6 +148,13 @@ MCP_TRANSPORT=sse MCP_PORT=3000 node dist/index.js
 1. Use `search_methods` to find methods related to your task
 2. Use `suggest_usage` to get recommended approaches for specific tasks
 3. Explore class methods and fields to understand capabilities
+
+### Generating Code Examples
+
+1. Use `analyze_jar` or `analyze_project` to load class information
+2. Search for relevant classes with `search_classes`
+3. Use `generate_code_pattern` with a specific pattern (e.g., 'builder', 'async') to get code examples
+4. Adapt the generated code examples to your specific requirements
 
 ## Testing
 

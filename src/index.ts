@@ -6,22 +6,123 @@ import {
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import path from 'path';
+import { promises as fs } from 'fs';
+import { parseStringPromise } from 'xml2js';
 import { MavenParser } from './services/maven-parser.js';
 import { JarAnalyzer } from './services/jar-analyzer.js';
 import { ApiSearch } from './services/api-search.js';
+import { CodeGenerator } from './services/code-generator.js';
+import { CacheService } from './services/cache-service.js';
 import { MavenDependency } from './models/types.js';
 
-// Initialize services
-const mavenParser = new MavenParser();
-const jarAnalyzer = new JarAnalyzer();
-const apiSearch = new ApiSearch();
+/**
+ * Parse command line arguments and environment variables for configuration
+ */
+async function getLocalRepoPath(): Promise<string | undefined> {
+  // Check command line arguments first
+  const localRepoArg = process.argv.find(arg => arg.startsWith('--local-repo='));
+  if (localRepoArg) {
+    const repoPath = localRepoArg.split('=')[1];
+    if (repoPath) {
+      if (validateLocalRepoPath(repoPath)) {
+        console.log(`Using local repository from command line: ${repoPath}`);
+        return repoPath;
+      } else {
+        console.warn(`Warning: Local repository path from command line does not exist or is not accessible: ${repoPath}`);
+        console.warn(`Falling back to next option`);
+      }
+    }
+  }
+  
+  // Check environment variable
+  if (process.env.MAVEN_LOCAL_REPO) {
+    const repoPath = process.env.MAVEN_LOCAL_REPO;
+    if (validateLocalRepoPath(repoPath)) {
+      console.log(`Using local repository from environment: ${repoPath}`);
+      return repoPath;
+    } else {
+      console.warn(`Warning: Local repository path from environment does not exist or is not accessible: ${repoPath}`);
+      console.warn(`Falling back to next option`);
+    }
+  }
+  
+  // Check Maven settings.xml files
+  const settingsRepoPath = await getMavenSettingsLocalRepo();
+  if (settingsRepoPath && validateLocalRepoPath(settingsRepoPath)) {
+    console.log(`Using local repository from Maven settings: ${settingsRepoPath}`);
+    return settingsRepoPath;
+  }
+  
+  // No custom configuration, use default
+  return undefined;
+}
 
-// Create an MCP server
-const server = new McpServer({
-  name: "Maven API Explorer",
-  version: "1.0.0",
-  description: "Explore Java APIs from Maven dependencies",
-});
+/**
+ * Get local repository path from Maven settings.xml files
+ */
+async function getMavenSettingsLocalRepo(): Promise<string | undefined> {
+  const homeDir = process.env.HOME || '';
+  const mavenHome = process.env.MAVEN_HOME || process.env.M2_HOME;
+  
+  // List of potential settings.xml locations (in priority order)
+  const settingsLocations = [
+    path.join(homeDir, '.m2', 'settings.xml'),
+    ...(mavenHome ? [path.join(mavenHome, 'conf', 'settings.xml')] : [])
+  ];
+  
+  for (const settingsPath of settingsLocations) {
+    try {
+      const settingsContent = await fs.readFile(settingsPath, 'utf-8');
+      const parsedSettings = await parseStringPromise(settingsContent, { explicitArray: false });
+      
+      if (parsedSettings.settings && parsedSettings.settings.localRepository) {
+        const localRepo = parsedSettings.settings.localRepository;
+        console.log(`Found local repository in ${settingsPath}: ${localRepo}`);
+        return localRepo;
+      }
+    } catch (error) {
+      // Settings file doesn't exist or is invalid, continue to next location
+    }
+  }
+  
+  return undefined;
+}
+
+/**
+ * Validate that the local repository path exists and is accessible
+ */
+function validateLocalRepoPath(repoPath: string): boolean {
+  try {
+    const fs = require('fs');
+    const stats = fs.statSync(repoPath);
+    return stats.isDirectory();
+  } catch (error) {
+    return false;
+  }
+}
+
+/**
+ * Initialize and start the MCP server
+ */
+async function startServer() {
+  // Initialize cache service first
+  const cacheService = new CacheService();
+
+  // Get configured local repository path
+  const localRepoPath = await getLocalRepoPath();
+
+  // Initialize services with cache and custom local repo path
+  const mavenParser = new MavenParser(localRepoPath, undefined, cacheService);
+  const jarAnalyzer = new JarAnalyzer(localRepoPath, undefined, cacheService);
+  const apiSearch = new ApiSearch();
+  const codeGenerator = new CodeGenerator();
+
+  // Create an MCP server
+  const server = new McpServer({
+    name: "Maven API Explorer",
+    version: "1.0.0",
+    description: "Explore Java APIs from Maven dependencies",
+  });
 
 // Tool to analyze POM file
 server.tool(
@@ -542,9 +643,147 @@ server.tool(
   }
 );
 
-// Start receiving messages on stdin and sending messages on stdout
-const transport = new StdioServerTransport();
+  // Start receiving messages on stdin and sending messages on stdout
+  const transport = new StdioServerTransport();
+
+// Tool to generate code patterns
+server.tool(
+  "generate_code_pattern",
+  "Generate code examples for common usage patterns of a Java class",
+  {
+    package_name: z.string().describe("The package name"),
+    class_name: z.string().describe("The class name"),
+    pattern: z.string().describe("The pattern to generate (e.g., 'builder', 'singleton', 'factory', 'stream', 'crud', 'rest', 'callback', 'async')"),
+  },
+  async (params) => {
+    try {
+      const fullClassName = `${params.package_name}.${params.class_name}`;
+      const classInfo = apiSearch.getClassByFullName(fullClassName);
+      
+      if (!classInfo) {
+        return {
+          content: [{
+            type: "text",
+            text: `Class not found: ${fullClassName}`,
+          }],
+        };
+      }
+      
+      const code = codeGenerator.generatePattern(classInfo, params.pattern);
+      
+      return {
+        content: [{
+          type: "text",
+          text: `# Code Pattern: ${params.pattern} for ${classInfo.name}\n\n\`\`\`java\n${code}\n\`\`\`\n\nThis example demonstrates how to use the ${params.pattern} pattern with the ${fullClassName} class.`,
+        }],
+      };
+    } catch (err) {
+      const error = err as Error;
+      return {
+        content: [{
+          type: "text",
+          text: `Error generating code pattern: ${error.message}`,
+        }],
+        error: true,
+      };
+    }
+  }
+);
+
+// Tool to clear the cache
+server.tool(
+  "clear_cache",
+  "Clear the cache for a fresh analysis",
+  {},
+  async () => {
+    try {
+      await cacheService.clearCache();
+      
+      return {
+        content: [{
+          type: "text",
+          text: "Cache cleared successfully. The next analysis will be performed from scratch.",
+        }],
+      };
+    } catch (err) {
+      const error = err as Error;
+      return {
+        content: [{
+          type: "text",
+          text: `Error clearing cache: ${error.message}`,
+        }],
+        error: true,
+      };
+    }
+  }
+);
+
+// Tool to check remote Maven repository connectivity
+server.tool(
+  "check_maven_repository",
+  "Check connectivity to Maven repositories",
+  {
+    repo_url: z.string().optional().describe("Optional Maven repository URL to check (defaults to Maven Central)"),
+  },
+  async (params) => {
+    try {
+      const repoUrl = params.repo_url || 'https://repo1.maven.org/maven2';
+      
+      // Try to fetch a small test file from the repository
+      const testUrl = `${repoUrl}/org/apache/maven/maven-core/3.9.6/maven-core-3.9.6.pom`;
+      console.log(`Testing Maven repository connectivity: ${testUrl}`);
+      
+      const response = await fetch(testUrl);
+      
+      if (response.ok) {
+        return {
+          content: [{
+            type: "text",
+            text: `Maven repository at ${repoUrl} is accessible. Status: ${response.status} ${response.statusText}`,
+          }],
+        };
+      } else {
+        return {
+          content: [{
+            type: "text",
+            text: `Maven repository at ${repoUrl} returned an error. Status: ${response.status} ${response.statusText}`,
+          }],
+          error: true,
+        };
+      }
+    } catch (err) {
+      const error = err as Error;
+      return {
+        content: [{
+          type: "text",
+          text: `Error connecting to Maven repository: ${error.message}`,
+        }],
+        error: true,
+      };
+    }
+  }
+);
+
+  // Ensure cache is persisted when the service exits
+  process.on('SIGINT', async () => {
+    console.log('Persisting cache before exit...');
+    await cacheService.persistCache();
+    process.exit(0);
+  });
+
+  process.on('SIGTERM', async () => {
+    console.log('Persisting cache before exit...');
+    await cacheService.persistCache();
+    process.exit(0);
+  });
+
+  // Start the server
+  console.log('Starting Maven API Explorer MCP server...');
+  await server.connect(transport);
+}
 
 // Start the server
-console.log('Starting Maven API Explorer MCP server...');
-await server.connect(transport);
+startServer().catch((error) => {
+  console.error('Failed to start server:', error);
+  process.exit(1);
+});
