@@ -18,16 +18,17 @@ An MCP (Model Context Protocol) server that helps AI assistants understand Java 
 | Tool Name | Description |
 |-----------|-------------|
 | `analyze_pom` | Analyze a Maven POM file to extract dependencies |
-| `analyze_jar` | Analyze a JAR file to extract class information |
+| `analyze_jar` | Analyze a JAR file to extract class information (interactive) |
 | `search_classes` | Search for Java classes by name or description |
 | `search_methods` | Search for Java methods by name, return type, or description |
 | `get_class_details` | Get detailed information about a Java class |
 | `get_method_examples` | Get usage examples for a Java method |
-| `analyze_project` | Analyze a complete Maven project including all dependencies |
+| `analyze_project` | Analyze a complete Maven project including all dependencies (interactive) |
 | `suggest_usage` | Suggest how to use a Java class for a specific task |
 | `generate_code_pattern` | Generate code examples for common usage patterns of a Java class |
 | `clear_cache` | Clear the cache to force fresh analysis |
 | `check_maven_repository` | Check connectivity to Maven repositories |
+| `set_offline_mode` | Enable/disable offline mode to prevent remote downloads |
 
 ## Code Generation Patterns
 
@@ -132,6 +133,56 @@ Example settings.xml:
 <settings>
   <localRepository>/custom/maven/repository</localRepository>
 </settings>
+```
+
+## Interactive Dependency Management
+
+The Maven API Explorer features **interactive dependency management** with user prompts for missing dependencies:
+
+### Behavior When Dependencies Are Missing
+
+When analyzing JARs that aren't available locally, the MCP will:
+
+1. **Check local repository** for main JAR and sources JAR
+2. **Prompt user for action** if neither is available:
+   - Download sources JAR (recommended for analysis)
+   - Download main JAR (compiled bytecode)
+   - Download both JARs
+   - Skip this dependency
+   - Enter offline mode
+
+3. **Ask for confirmation** before any downloads
+4. **Show download progress** with status updates
+
+### Example User Interaction
+
+```
+🔍 Dependency not found locally: org.apache.commons:commons-lang3:3.12.0
+What would you like to do?
+1. Download sources JAR (recommended for analysis)
+2. Download main JAR (compiled bytecode)  
+3. Download both JARs
+4. Skip this dependency
+5. Enter offline mode (skip all downloads)
+Enter your choice (1-5): 1
+
+📥 About to download sources JAR for org.apache.commons:commons-lang3:3.12.0
+Continue? (y/N): y
+
+🚀 Starting sources JAR for org.apache.commons:commons-lang3:3.12.0
+✅ Completed sources JAR for org.apache.commons:commons-lang3:3.12.0
+```
+
+### Offline Mode
+
+Use the `set_offline_mode` tool to prevent any remote downloads:
+
+```bash
+# Enable offline mode
+set_offline_mode(offline=true)
+
+# Disable offline mode  
+set_offline_mode(offline=false)
 ```
 
 ## Example Workflows

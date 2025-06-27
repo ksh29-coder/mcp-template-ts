@@ -115,16 +115,33 @@ The ApiSearch service provides fuzzy matching for:
 
 ## MCP Tools Available
 
-The server exposes 11 tools:
+The server exposes 12 tools:
 - `analyze_pom`: Parse Maven POM files
-- `analyze_jar`: Extract classes from JAR files
+- `analyze_jar`: Extract classes from JAR files (interactive)
 - `search_classes/search_methods`: API discovery
 - `get_class_details/get_method_examples`: Detailed API information
-- `analyze_project`: Full project dependency analysis
+- `analyze_project`: Full project dependency analysis (interactive)
 - `suggest_usage`: Task-based usage recommendations
 - `generate_code_pattern`: Pattern-based code generation
 - `clear_cache`: Cache management
 - `check_maven_repository`: Repository connectivity testing
+- `set_offline_mode`: Enable/disable offline mode
+
+## Interactive Dependency Management
+
+### Key Features
+- **User prompts** for missing dependencies with multiple options
+- **Sources JAR preference** for better analysis quality
+- **Download confirmation** before any remote fetching
+- **Offline mode** to prevent all remote downloads
+- **Progress feedback** during downloads
+
+### Priority Flow
+1. Use local main JAR if available
+2. Use local sources JAR if main JAR missing
+3. Prompt user for download options if neither available
+4. Download based on user choice (sources preferred)
+5. Fall back to offline mode if requested
 
 ## Code Generation Patterns
 

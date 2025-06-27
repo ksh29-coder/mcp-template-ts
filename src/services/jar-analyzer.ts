@@ -4,17 +4,35 @@ import fetch from 'node-fetch';
 import JSZip from 'jszip';
 import { JavaClass, JavaParameter, MavenDependency } from '../models/types.js';
 import { CacheService } from './cache-service.js';
+import { UserInteractionService } from './user-interaction.js';
 
 export class JarAnalyzer {
   private mavenRepoUrl: string;
   private localRepoPath: string;
   private classCache: Map<string, JavaClass> = new Map();
   private cacheService?: CacheService;
+  private userInteraction: UserInteractionService;
+  private offlineMode: boolean = false;
 
   constructor(localRepoPath?: string, mavenRepoUrl?: string, cacheService?: CacheService) {
     this.mavenRepoUrl = mavenRepoUrl || 'https://repo1.maven.org/maven2';
     this.localRepoPath = localRepoPath || path.join(process.env.HOME || '', '.m2', 'repository');
     this.cacheService = cacheService;
+    this.userInteraction = new UserInteractionService();
+  }
+
+  /**
+   * Close the user interaction service
+   */
+  close(): void {
+    this.userInteraction.close();
+  }
+
+  /**
+   * Set offline mode
+   */
+  setOfflineMode(offline: boolean): void {
+    this.offlineMode = offline;
   }
 
   /**
@@ -30,41 +48,62 @@ export class JarAnalyzer {
       }
     }
     
+    const dependencyName = `${dependency.groupId}:${dependency.artifactId}:${dependency.version}`;
     const jarPath = this.buildLocalJarPath(dependency);
     const sourcesJarPath = this.buildLocalSourcesJarPath(dependency);
+    
+    // Check what's available locally
+    const mainJarExists = await this.fileExists(jarPath);
+    const sourcesJarExists = await this.fileExists(sourcesJarPath);
+    
     let jarBuffer: Buffer;
     let useSourcesJar = false;
-
-    try {
-      // Try to read main JAR from local Maven repository
+    
+    if (mainJarExists) {
+      // Main JAR available locally - use it
       jarBuffer = await fs.readFile(jarPath);
-      console.log(`Using main JAR: ${jarPath}`);
-    } catch (error) {
-      // Main JAR not found, try sources JAR
+      console.log(`✅ Using local main JAR: ${jarPath}`);
+    } else if (sourcesJarExists) {
+      // Sources JAR available locally - use it  
+      jarBuffer = await fs.readFile(sourcesJarPath);
+      useSourcesJar = true;
+      console.log(`✅ Using local sources JAR: ${sourcesJarPath}`);
+    } else {
+      // Neither available locally - ask user what to do
+      if (this.offlineMode) {
+        throw new Error(`Dependency ${dependencyName} not available locally and offline mode is enabled`);
+      }
+      
       try {
-        jarBuffer = await fs.readFile(sourcesJarPath);
-        useSourcesJar = true;
-        console.log(`Main JAR not found, using sources JAR: ${sourcesJarPath}`);
-      } catch (sourcesError) {
-        // Neither main nor sources JAR found locally, fetch from Maven Central
-        console.log(`Neither main nor sources JAR found locally for ${dependency.groupId}:${dependency.artifactId}:${dependency.version}, fetching from remote`);
-        const jarUrl = this.buildMavenRepoJarUrl(dependency);
-        const response = await fetch(jarUrl);
+        const choice = await this.userInteraction.promptForMissingDependency(
+          dependency.groupId,
+          dependency.artifactId,
+          dependency.version
+        );
         
-        if (!response.ok) {
-          throw new Error(`Could not fetch JAR from ${jarUrl}: ${response.statusText}`);
+        if (choice.type === 'skip') {
+          throw new Error(`User chose to skip dependency: ${dependencyName}`);
         }
         
-        jarBuffer = Buffer.from(await response.arrayBuffer());
+        // Download based on user choice
+        const downloadResult = await this.downloadDependency(dependency, choice.type);
+        jarBuffer = downloadResult.buffer;
+        useSourcesJar = downloadResult.isSourcesJar;
         
-        // Save to local repo for future use
-        await this.saveToLocalRepo(dependency, jarBuffer);
+      } catch (error) {
+        if ((error as Error).message === 'OFFLINE_MODE') {
+          this.offlineMode = true;
+          throw new Error(`Entered offline mode. Dependency ${dependencyName} not available locally.`);
+        }
+        throw error;
       }
     }
 
-    // Also try to fetch sources and javadoc JARs
-    await this.fetchSourcesJar(dependency);
-    await this.fetchJavadocJar(dependency);
+    // Also try to fetch sources and javadoc JARs if not already present
+    if (!useSourcesJar && !sourcesJarExists) {
+      await this.ensureSourcesJar(dependency);
+    }
+    await this.ensureJavadocJar(dependency);
 
     // Parse the JAR file (handle sources JAR differently)
     const classes = await this.parseJarFile(jarBuffer, dependency, useSourcesJar);
@@ -75,6 +114,165 @@ export class JarAnalyzer {
     }
     
     return classes;
+  }
+
+  /**
+   * Check if a file exists
+   */
+  private async fileExists(filePath: string): Promise<boolean> {
+    try {
+      await fs.access(filePath);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Download dependency based on user choice
+   */
+  private async downloadDependency(
+    dependency: MavenDependency, 
+    type: 'main' | 'sources' | 'both'
+  ): Promise<{ buffer: Buffer; isSourcesJar: boolean }> {
+    if (type === 'both') {
+      // Download both, prefer sources for analysis
+      await this.downloadWithConfirmation(dependency, 'sources');
+      await this.downloadWithConfirmation(dependency, 'main');
+      
+      const sourcesJarPath = this.buildLocalSourcesJarPath(dependency);
+      const buffer = await fs.readFile(sourcesJarPath);
+      return { buffer, isSourcesJar: true };
+    } else {
+      // Download single type
+      await this.downloadWithConfirmation(dependency, type);
+      
+      if (type === 'sources') {
+        const sourcesJarPath = this.buildLocalSourcesJarPath(dependency);
+        const buffer = await fs.readFile(sourcesJarPath);
+        return { buffer, isSourcesJar: true };
+      } else {
+        const jarPath = this.buildLocalJarPath(dependency);
+        const buffer = await fs.readFile(jarPath);
+        return { buffer, isSourcesJar: false };
+      }
+    }
+  }
+
+  /**
+   * Download a specific JAR type with user confirmation
+   */
+  private async downloadWithConfirmation(
+    dependency: MavenDependency,
+    type: 'main' | 'sources'
+  ): Promise<void> {
+    const dependencyName = `${dependency.groupId}:${dependency.artifactId}:${dependency.version}`;
+    
+    // Ask for confirmation
+    const confirmed = await this.userInteraction.confirmDownload(type, dependencyName);
+    if (!confirmed) {
+      throw new Error(`User cancelled download of ${type} JAR for ${dependencyName}`);
+    }
+    
+    this.userInteraction.showDownloadProgress(dependencyName, type, 'starting');
+    
+    try {
+      if (type === 'sources') {
+        await this.downloadSourcesJar(dependency);
+      } else {
+        await this.downloadMainJar(dependency);
+      }
+      
+      this.userInteraction.showDownloadProgress(dependencyName, type, 'completed');
+    } catch (error) {
+      this.userInteraction.showDownloadProgress(dependencyName, type, 'failed');
+      throw error;
+    }
+  }
+
+  /**
+   * Download main JAR
+   */
+  private async downloadMainJar(dependency: MavenDependency): Promise<void> {
+    const jarUrl = this.buildMavenRepoJarUrl(dependency);
+    const response = await fetch(jarUrl);
+    
+    if (!response.ok) {
+      throw new Error(`Could not fetch main JAR from ${jarUrl}: ${response.statusText}`);
+    }
+    
+    const jarBuffer = Buffer.from(await response.arrayBuffer());
+    await this.saveToLocalRepo(dependency, jarBuffer);
+  }
+
+  /**
+   * Download sources JAR
+   */
+  private async downloadSourcesJar(dependency: MavenDependency): Promise<void> {
+    const sourcesUrl = this.buildMavenRepoSourcesJarUrl(dependency);
+    const response = await fetch(sourcesUrl);
+    
+    if (!response.ok) {
+      throw new Error(`Could not fetch sources JAR from ${sourcesUrl}: ${response.statusText}`);
+    }
+    
+    const sourcesBuffer = Buffer.from(await response.arrayBuffer());
+    await this.saveSourcesJarToLocalRepo(dependency, sourcesBuffer);
+  }
+
+  /**
+   * Ensure sources JAR is available (ask user if not)
+   */
+  private async ensureSourcesJar(dependency: MavenDependency): Promise<void> {
+    const sourcesJarPath = this.buildLocalSourcesJarPath(dependency);
+    const exists = await this.fileExists(sourcesJarPath);
+    
+    if (!exists && !this.offlineMode) {
+      const dependencyName = `${dependency.groupId}:${dependency.artifactId}:${dependency.version}`;
+      const shouldDownload = await this.userInteraction.promptForLimitedAnalysis(
+        dependencyName,
+        'Main JAR only (no source code for enhanced analysis)'
+      );
+      
+      if (shouldDownload) {
+        try {
+          await this.downloadWithConfirmation(dependency, 'sources');
+        } catch (error) {
+          console.error(`Failed to download sources JAR: ${(error as Error).message}`);
+        }
+      }
+    }
+  }
+
+  /**
+   * Ensure javadoc JAR is available (optional, no prompts)
+   */
+  private async ensureJavadocJar(dependency: MavenDependency): Promise<void> {
+    const javadocJarPath = this.buildLocalJavadocJarPath(dependency);
+    const exists = await this.fileExists(javadocJarPath);
+    
+    if (!exists && !this.offlineMode) {
+      try {
+        await this.fetchJavadocJar(dependency);
+      } catch (error) {
+        // Javadoc is optional, don't fail if not available
+      }
+    }
+  }
+
+  /**
+   * Save sources JAR to local repository
+   */
+  private async saveSourcesJarToLocalRepo(dependency: MavenDependency, content: Buffer): Promise<void> {
+    const sourcesJarPath = this.buildLocalSourcesJarPath(dependency);
+    
+    try {
+      await fs.mkdir(path.dirname(sourcesJarPath), { recursive: true });
+      await fs.writeFile(sourcesJarPath, content);
+    } catch (err) {
+      const error = err as Error;
+      console.warn(`Failed to save sources JAR to local repository: ${error.message}`);
+    }
   }
 
   /**
@@ -342,71 +540,35 @@ export class JarAnalyzer {
     return dirPath.replace(/\//g, '.');
   }
 
-  /**
-   * Fetch sources JAR for a dependency
-   */
-  private async fetchSourcesJar(dependency: MavenDependency): Promise<void> {
-    const sourcesJarPath = this.buildLocalSourcesJarPath(dependency);
-    
-    try {
-      // Check if it exists locally
-      await fs.access(sourcesJarPath);
-      return; // Already exists
-    } catch (error) {
-      // Need to fetch it
-      const sourcesJarUrl = this.buildMavenRepoSourcesJarUrl(dependency);
-      
-      try {
-        const response = await fetch(sourcesJarUrl);
-        if (!response.ok) {
-          console.log(`Sources JAR not found for ${dependency.groupId}:${dependency.artifactId}:${dependency.version}`);
-          return;
-        }
-        
-        const jarBuffer = Buffer.from(await response.arrayBuffer());
-        
-        // Save to local repo
-        await fs.mkdir(path.dirname(sourcesJarPath), { recursive: true });
-        await fs.writeFile(sourcesJarPath, jarBuffer);
-        console.log(`Downloaded sources JAR for ${dependency.groupId}:${dependency.artifactId}:${dependency.version}`);
-      } catch (err) {
-        const error = err as Error;
-        console.warn(`Error fetching sources JAR:`, error.message);
-      }
-    }
-  }
 
   /**
-   * Fetch Javadoc JAR for a dependency
+   * Fetch Javadoc JAR for a dependency (silent, no user interaction)
    */
   private async fetchJavadocJar(dependency: MavenDependency): Promise<void> {
     const javadocJarPath = this.buildLocalJavadocJarPath(dependency);
     
     try {
       // Check if it exists locally
-      await fs.access(javadocJarPath);
-      return; // Already exists
-    } catch (error) {
-      // Need to fetch it
+      const exists = await this.fileExists(javadocJarPath);
+      if (exists) return; // Already exists
+      
+      // Try to fetch silently (javadoc is optional enhancement)
       const javadocJarUrl = this.buildMavenRepoJavadocJarUrl(dependency);
       
-      try {
-        const response = await fetch(javadocJarUrl);
-        if (!response.ok) {
-          console.log(`Javadoc JAR not found for ${dependency.groupId}:${dependency.artifactId}:${dependency.version}`);
-          return;
-        }
-        
-        const jarBuffer = Buffer.from(await response.arrayBuffer());
-        
-        // Save to local repo
-        await fs.mkdir(path.dirname(javadocJarPath), { recursive: true });
-        await fs.writeFile(javadocJarPath, jarBuffer);
-        console.log(`Downloaded javadoc JAR for ${dependency.groupId}:${dependency.artifactId}:${dependency.version}`);
-      } catch (err) {
-        const error = err as Error;
-        console.warn(`Error fetching javadoc JAR:`, error.message);
+      const response = await fetch(javadocJarUrl);
+      if (!response.ok) {
+        // Javadoc not available, that's fine
+        return;
       }
+      
+      const jarBuffer = Buffer.from(await response.arrayBuffer());
+      
+      // Save to local repo
+      await fs.mkdir(path.dirname(javadocJarPath), { recursive: true });
+      await fs.writeFile(javadocJarPath, jarBuffer);
+      
+    } catch (error) {
+      // Javadoc is optional, don't log errors
     }
   }
 

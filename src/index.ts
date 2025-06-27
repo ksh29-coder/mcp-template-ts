@@ -764,15 +764,47 @@ server.tool(
   }
 );
 
+// Tool to set offline mode
+server.tool(
+  "set_offline_mode",
+  "Enable or disable offline mode to prevent any remote downloads",
+  {
+    offline: z.boolean().describe("Set to true to enable offline mode, false to disable"),
+  },
+  async (params) => {
+    try {
+      jarAnalyzer.setOfflineMode(params.offline);
+      
+      return {
+        content: [{
+          type: "text",
+          text: `Offline mode ${params.offline ? 'enabled' : 'disabled'}. ${params.offline ? 'No remote downloads will be attempted.' : 'Remote downloads are now allowed.'}`,
+        }],
+      };
+    } catch (err) {
+      const error = err as Error;
+      return {
+        content: [{
+          type: "text",
+          text: `Error setting offline mode: ${error.message}`,
+        }],
+        error: true,
+      };
+    }
+  }
+);
+
   // Ensure cache is persisted when the service exits
   process.on('SIGINT', async () => {
-    console.log('Persisting cache before exit...');
+    console.log('Cleaning up before exit...');
+    jarAnalyzer.close();
     await cacheService.persistCache();
     process.exit(0);
   });
 
   process.on('SIGTERM', async () => {
-    console.log('Persisting cache before exit...');
+    console.log('Cleaning up before exit...');
+    jarAnalyzer.close();
     await cacheService.persistCache();
     process.exit(0);
   });
